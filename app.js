@@ -4,10 +4,11 @@
   const navigationData = window.CanghaiNavigationData;
   const logic = window.CanghaiNavigationLogic;
   const geometry = window.CanghaiNavigationGeometry;
+  const mapPick = window.CanghaiMapPick;
   const { buildCampusModel, projectFaces, projectGeoPoint, projectGroundPlane, placeExteriorLabel, pickBuilding } = window.CanghaiModel;
   const { createViewerState, applyPointerDrag, applyPan, applyZoom, applyPinchGesture, setZoom, selectBuilding, setPreset } = window.CanghaiViewerState;
   const { createFlowState, transitionFlow } = window.CanghaiNavigationFlow || {};
-  if (!campusData || !navigationData || !logic || !geometry || !createFlowState) return;
+  if (!campusData || !navigationData || !logic || !geometry || !mapPick || !createFlowState) return;
 
   const canvas = document.querySelector('#model-canvas');
   const context = canvas.getContext('2d');
@@ -38,7 +39,7 @@
   const outdoorGraph = buildGraph(navigationData.edges.filter((edge) => edge.kind !== 'covered-connector'));
   const model = buildCampusModel(campusData);
   const colors = ['#9fc4d8', '#c5b7e4', '#a8cec0', '#ebc993', '#b7c3cf'];
-  let state = { ...setPreset(createViewerState(), 'top'), startNodeId: navigationData.defaultStartNodeId, startPickPixel: null, targetPlaceId: null, targetNodeId: null, targetPickPixel: null, mapMode: 'idle', routeStrategy: 'outdoor' };
+  let state = { ...setPreset(createViewerState(), 'top'), startNodeId: navigationData.defaultStartNodeId, startPickPixel: null, targetPlaceId: null, targetNodeId: null, targetPickPixel: null, nearbyCandidatePlaceIds: [], nearbyPickPixel: null, mapMode: 'idle', routeStrategy: 'outdoor' };
   let flow = createFlowState();
   let lastFaces = [];
   const activePointers = new Map();
@@ -282,15 +283,26 @@
   }
 
   function drawFacilitiesAndEndpoints() {
+    const nearbyCandidates = new Set(state.nearbyCandidatePlaceIds);
     navigationData.places.filter((place) => place.isFacility && place.simulated).forEach((place) => {
       const point = facilityPoint(place);
       const selected = place.id === state.targetPlaceId;
-      drawCircle(point, selected ? 11 : 8, selected ? '#e76836' : '#486f9f');
+      const nearby = nearbyCandidates.has(place.id);
+      drawCircle(point, selected ? 11 : (nearby ? 11 : 8), selected ? '#e76836' : (nearby ? '#f4b941' : '#486f9f'));
       context.fillStyle = '#fff';
       context.textAlign = 'center';
       context.textBaseline = 'middle';
       context.font = '700 9px Microsoft YaHei, sans-serif';
       context.fillText(place.type === '卫生间' ? '厕' : '点', point.x, point.y + .5);
+    });
+    navigationData.places.filter((place) => nearbyCandidates.has(place.id) && !place.isFacility).forEach((place) => {
+      const point = facilityPoint(place);
+      drawCircle(point, 11, '#f4b941', '#fff');
+      context.fillStyle = '#2c4440';
+      context.font = '800 9px Microsoft YaHei, sans-serif';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText('候', point.x, point.y + .5);
     });
     const start = state.startPickPixel || projectedGeo(nodeById[state.startNodeId].point, 1.4);
     drawCircle(start, 10, '#dc4d4d');
@@ -342,7 +354,7 @@
     zoomRange.value = String(Math.round(state.camera.zoom * 100));
     zoomValue.textContent = `${Math.round(state.camera.zoom * 100)}%`;
     screens.forEach((screen) => { const active = screen.dataset.flowScreen === flow.screen; screen.hidden = !active; screen.classList.toggle('is-active', active); });
-    mapHint.textContent = state.activePreset === 'top' ? (state.mapMode === 'start' ? '点选地图，标记「我在这里」' : (state.mapMode === 'target' ? '点选楼栋或设施，选择目的地' : '单指拖动平移 · 双指缩放')) : '拖动旋转 3D 视图 · 双指缩放 / 平移';
+    mapHint.textContent = state.activePreset === 'top' ? (state.mapMode === 'start' ? '点选地图，附近地点会给出候选' : (state.mapMode === 'target' ? '点选楼栋、设施或空白地图位置' : '单指拖动平移 · 双指缩放')) : '拖动旋转 3D 视图 · 双指缩放 / 平移';
   }
 
   function renderRouteOptions(options, activeId) {
@@ -410,7 +422,7 @@
   function selectTargetCandidate(placeId) {
     const target = placeById[placeId];
     if (!target) return;
-    state = { ...state, targetPlaceId: placeId, targetNodeId: target.nodeId, targetPickPixel: null, selectedBuildingId: target.buildingId || state.selectedBuildingId, mapMode: 'target' };
+    state = { ...state, targetPlaceId: placeId, targetNodeId: target.nodeId, targetPickPixel: null, nearbyCandidatePlaceIds: [], nearbyPickPixel: null, selectedBuildingId: target.buildingId || state.selectedBuildingId, mapMode: 'target' };
     searchInput.value = '';
     searchResults.replaceChildren();
     flow = transitionFlow(flow, 'preview-target', placeId);
@@ -418,12 +430,12 @@
     render();
   }
 
-  function selectStartCandidate(nodeId, pickPixel = null) {
+  function selectStartCandidate(nodeId, pickPixel = null, configuredPlace = null) {
     const node = nodeById[nodeId];
     if (!node) return;
-    state = { ...state, startNodeId: nodeId, startPickPixel: pickPixel, mapMode: 'start' };
+    state = { ...state, startNodeId: nodeId, startPickPixel: pickPixel, nearbyCandidatePlaceIds: [], nearbyPickPixel: null, selectedBuildingId: configuredPlace?.buildingId || state.selectedBuildingId, mapMode: 'start' };
     flow = transitionFlow(flow, 'preview-start', nodeId);
-    const candidate = pickPixel ? logic.createMapPointPlace('start', pickPixel, nodeId) : { ...node, type: '位置节点', nodeId };
+    const candidate = pickPixel ? logic.createMapPointPlace('start', pickPixel, nodeId) : (configuredPlace || { ...node, type: '位置节点', nodeId });
     renderCandidateCard(startConfirmation, candidate, 'start');
     render();
   }
@@ -432,7 +444,7 @@
     const node = nodeById[nodeId];
     if (!node || !pickPixel) return;
     const candidate = logic.createMapPointPlace('target', pickPixel, nodeId);
-    state = { ...state, targetPlaceId: candidate.id, targetNodeId: nodeId, targetPickPixel: pickPixel, mapMode: 'target' };
+    state = { ...state, targetPlaceId: candidate.id, targetNodeId: nodeId, targetPickPixel: pickPixel, nearbyCandidatePlaceIds: [], nearbyPickPixel: null, mapMode: 'target' };
     flow = transitionFlow(flow, 'preview-target', candidate.id);
     searchInput.value = '';
     searchResults.replaceChildren();
@@ -441,7 +453,7 @@
   }
 
   function renderCandidateCard(container, candidate, kind) {
-    const name = kind === 'start' ? '用户所在地' : candidate.name;
+    const name = candidate.isMapPoint && kind === 'start' ? '用户所在地' : candidate.name;
     const descriptor = candidate.isMapPoint
       ? '已保留你点选的地图位置；路线会从附近可通行道路开始计算。'
       : kind === 'start' ? '请先核对当前位置。' : `${candidate.type}${candidate.floor ? ` · ${candidate.floor}` : ''}，请先核对位置与入口。`;
@@ -462,6 +474,46 @@
       const candidate = facilityPoint(place);
       return (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2 < 18 ** 2;
     }) || null;
+  }
+
+  function nearbyConfiguredPlaces(point) {
+    const anchors = navigationData.places
+      .filter((place) => place.type === '教学楼' || place.type === '宿舍' || place.isFacility || place.type === '教室' || place.type === '教室范围')
+      .map((place) => ({ id: place.id, place, point: facilityPoint(place) }));
+    return mapPick.findNearbyAnchors(point, anchors, 38)
+      .map((anchor) => anchor.place)
+      .filter((place, index, places) => places.findIndex((item) => item.id === place.id) === index)
+      .slice(0, 4);
+  }
+
+  function renderNearbyChoices(point) {
+    const kind = state.mapMode;
+    if (kind !== 'start' && kind !== 'target') return;
+    const candidates = nearbyConfiguredPlaces(point);
+    if (!candidates.length) {
+      if (kind === 'start') selectStartCandidate(nearestNodeAt(point).id, point);
+      else selectTargetMapPoint(nearestNodeAt(point).id, point);
+      return;
+    }
+    state = { ...state, nearbyCandidatePlaceIds: candidates.map((place) => place.id), nearbyPickPixel: point };
+    const container = kind === 'start' ? startConfirmation : targetConfirmation;
+    const freeLabel = kind === 'start' ? '保留为用户所在地' : '保留为地图点选位置';
+    const items = candidates.map((place) => `<button type="button" class="search-option" data-map-pick-place-id="${place.id}"><span>${place.name}</span><small>${place.floor ? `${place.floor} · ` : ''}${place.type}</small></button>`).join('');
+    container.hidden = false;
+    container.innerHTML = `<div class="candidate-heading"><span>附近地点</span><b>请选择一个候选</b></div><p>已标亮附近可识别地点；也可以保留你刚才点选的位置。</p><div class="search-results">${items}</div><button type="button" class="map-choice" data-map-pick-free="${kind}">${freeLabel}</button>`;
+    render();
+  }
+
+  function openBuildingAction(buildingId) {
+    const buildingPlace = buildingPlaceById[buildingId];
+    state = { ...selectBuilding(state, buildingId), nearbyCandidatePlaceIds: [], nearbyPickPixel: null };
+    if (window.CanghaiMapHooks?.onBuildingSelected) {
+      window.CanghaiMapHooks.onBuildingSelected(buildingId, state.mapMode);
+      return;
+    }
+    if (!buildingPlace) return;
+    if (state.mapMode === 'start') selectStartCandidate(buildingPlace.nodeId, null, buildingPlace);
+    else selectTargetCandidate(buildingPlace.id);
   }
 
   function nudgeStart(direction) {
@@ -543,18 +595,9 @@
     if (wasSingleTap) {
       const buildingId = pickBuilding(lastFaces, point);
       if (buildingId) {
-        const buildingPlace = buildingPlaceById[buildingId];
-        state = selectBuilding(state, buildingId);
-        if (buildingPlace && state.mapMode === 'start') selectStartCandidate(buildingPlace.nodeId, point);
-        else if (buildingPlace && state.mapMode === 'target') selectTargetCandidate(buildingPlace.id);
-        else if (window.CanghaiMapHooks?.onBuildingSelected) window.CanghaiMapHooks.onBuildingSelected(buildingId);
-        else if (buildingPlace) selectTargetCandidate(buildingPlace.id);
-      } else if (state.mapMode === 'start') {
-        selectStartCandidate(nearestNodeAt(point).id, point);
-      } else if (state.mapMode === 'target') {
-        const facility = pickFacility(point);
-        if (facility) selectTargetCandidate(facility.id);
-        else selectTargetMapPoint(nearestNodeAt(point).id, point);
+        openBuildingAction(buildingId);
+      } else if (state.mapMode === 'start' || state.mapMode === 'target') {
+        renderNearbyChoices(point);
       }
       render();
     }
@@ -607,6 +650,21 @@
   document.querySelectorAll('[data-popular-place]').forEach((button) => button.addEventListener('click', () => selectTargetCandidate(button.dataset.popularPlace)));
   document.querySelector('[data-target-mode]').addEventListener('click', () => { state = { ...state, mapMode: 'target' }; render(); });
   document.querySelector('.navigation-panel').addEventListener('click', (event) => {
+    const pickedPlaceId = event.target.closest('[data-map-pick-place-id]')?.dataset.mapPickPlaceId;
+    if (pickedPlaceId) {
+      const place = placeById[pickedPlaceId];
+      if (place) {
+        if (state.mapMode === 'start') selectStartCandidate(place.nodeId, null, place);
+        else if (state.mapMode === 'target') selectTargetCandidate(place.id);
+      }
+      return;
+    }
+    const freePick = event.target.closest('[data-map-pick-free]')?.dataset.mapPickFree;
+    if (freePick && state.nearbyPickPixel) {
+      if (freePick === 'start') selectStartCandidate(nearestNodeAt(state.nearbyPickPixel).id, state.nearbyPickPixel);
+      if (freePick === 'target') selectTargetMapPoint(nearestNodeAt(state.nearbyPickPixel).id, state.nearbyPickPixel);
+      return;
+    }
     const confirmation = event.target.closest('[data-confirm]')?.dataset.confirm;
     if (confirmation === 'start') { flow = transitionFlow(flow, 'confirm-start'); state = { ...state, mapMode: 'target' }; }
     if (confirmation === 'target') { flow = transitionFlow(flow, 'confirm-target'); state = { ...state, mapMode: 'idle' }; }
@@ -623,7 +681,9 @@
     ...(window.CanghaiMapHooks || {}),
     onBuildingRoute: (buildingId) => {
       const place = logic.findBuildingPlace(navigationData.places, buildingId) || buildingPlaceById[buildingId];
-      if (place) selectTargetCandidate(place.id);
+      if (!place) return;
+      if (state.mapMode === 'start') selectStartCandidate(place.nodeId, null, place);
+      else selectTargetCandidate(place.id);
     },
   };
 
